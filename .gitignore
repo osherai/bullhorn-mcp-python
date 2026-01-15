@@ -36,3 +36,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Local files (not for repo)
+CASE_STUDY.md
