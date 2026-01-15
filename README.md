@@ -50,7 +50,7 @@ To obtain these:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/bullhorn-mcp-python.git
+git clone https://github.com/osherai/bullhorn-mcp-python.git
 cd bullhorn-mcp-python
 ```
 
