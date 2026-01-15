@@ -1,0 +1,224 @@
+"""Tests for Bullhorn API client."""
+
+import time
+import pytest
+import httpx
+import respx
+from unittest.mock import Mock, PropertyMock
+from bullhorn_mcp.auth import BullhornAuth, BullhornSession
+from bullhorn_mcp.client import BullhornClient, BullhornAPIError, DEFAULT_FIELDS
+
+
+@pytest.fixture
+def mock_auth(mock_session):
+    """Create a mock auth object with a valid session."""
+    auth = Mock(spec=BullhornAuth)
+    type(auth).session = PropertyMock(return_value=mock_session)
+    return auth
+
+
+class TestBullhornClient:
+    """Tests for BullhornClient class."""
+
+    @respx.mock
+    def test_search_jobs(self, mock_auth, mock_session, sample_job):
+        """Test searching for jobs."""
+        respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(
+                200,
+                json={"data": [sample_job]},
+            )
+        )
+
+        client = BullhornClient(mock_auth)
+        results = client.search("JobOrder", "isOpen:1", count=10)
+
+        assert len(results) == 1
+        assert results[0]["id"] == 12345
+        assert results[0]["title"] == "Software Engineer"
+
+    @respx.mock
+    def test_search_candidates(self, mock_auth, mock_session, sample_candidate):
+        """Test searching for candidates."""
+        respx.get(f"{mock_session.rest_url}/search/Candidate").mock(
+            return_value=httpx.Response(
+                200,
+                json={"data": [sample_candidate]},
+            )
+        )
+
+        client = BullhornClient(mock_auth)
+        results = client.search("Candidate", "lastName:Smith")
+
+        assert len(results) == 1
+        assert results[0]["firstName"] == "John"
+        assert results[0]["lastName"] == "Smith"
+
+    @respx.mock
+    def test_search_with_custom_fields(self, mock_auth, mock_session):
+        """Test search with custom fields."""
+        route = respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.search("JobOrder", "isOpen:1", fields="id,title,salary")
+
+        # Check that custom fields were passed
+        assert "fields=id%2Ctitle%2Csalary" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_search_with_sort(self, mock_auth, mock_session):
+        """Test search with sort parameter."""
+        route = respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.search("JobOrder", "isOpen:1", sort="-dateAdded")
+
+        assert "sort=-dateAdded" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_search_count_limit(self, mock_auth, mock_session):
+        """Test that count is limited to 500."""
+        route = respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.search("JobOrder", "isOpen:1", count=1000)  # Request more than max
+
+        # Should be capped at 500
+        assert "count=500" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_query_entities(self, mock_auth, mock_session, sample_job):
+        """Test querying entities with WHERE clause."""
+        respx.get(f"{mock_session.rest_url}/query/JobOrder").mock(
+            return_value=httpx.Response(
+                200,
+                json={"data": [sample_job]},
+            )
+        )
+
+        client = BullhornClient(mock_auth)
+        results = client.query("JobOrder", "salary > 100000")
+
+        assert len(results) == 1
+        assert results[0]["salary"] == 150000
+
+    @respx.mock
+    def test_query_with_order_by(self, mock_auth, mock_session):
+        """Test query with orderBy parameter."""
+        route = respx.get(f"{mock_session.rest_url}/query/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.query("JobOrder", "isOpen=true", order_by="-dateAdded")
+
+        assert "orderBy=-dateAdded" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_get_entity_by_id(self, mock_auth, mock_session, sample_job):
+        """Test getting a single entity by ID."""
+        respx.get(f"{mock_session.rest_url}/entity/JobOrder/12345").mock(
+            return_value=httpx.Response(
+                200,
+                json={"data": sample_job},
+            )
+        )
+
+        client = BullhornClient(mock_auth)
+        result = client.get("JobOrder", 12345)
+
+        assert result["id"] == 12345
+        assert result["title"] == "Software Engineer"
+
+    @respx.mock
+    def test_get_entity_with_custom_fields(self, mock_auth, mock_session):
+        """Test getting entity with custom fields."""
+        route = respx.get(f"{mock_session.rest_url}/entity/Candidate/67890").mock(
+            return_value=httpx.Response(200, json={"data": {}})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.get("Candidate", 67890, fields="id,firstName,lastName,email")
+
+        assert "fields=id%2CfirstName%2ClastName%2Cemail" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_get_meta(self, mock_auth, mock_session):
+        """Test getting entity metadata."""
+        meta_response = {
+            "entity": "JobOrder",
+            "fields": [
+                {"name": "id", "type": "Integer"},
+                {"name": "title", "type": "String"},
+            ],
+        }
+        respx.get(f"{mock_session.rest_url}/meta/JobOrder").mock(
+            return_value=httpx.Response(200, json=meta_response)
+        )
+
+        client = BullhornClient(mock_auth)
+        result = client.get_meta("JobOrder")
+
+        assert result["entity"] == "JobOrder"
+        assert len(result["fields"]) == 2
+
+    @respx.mock
+    def test_api_error_handling(self, mock_auth, mock_session):
+        """Test handling of API errors."""
+        respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(500, text="Internal Server Error")
+        )
+
+        client = BullhornClient(mock_auth)
+
+        with pytest.raises(BullhornAPIError) as exc_info:
+            client.search("JobOrder", "isOpen:1")
+
+        assert "500" in str(exc_info.value)
+
+    @respx.mock
+    def test_session_refresh_on_401(self, mock_auth, mock_session, sample_job):
+        """Test that 401 triggers session refresh and retry."""
+        # First call returns 401, second succeeds
+        route = respx.get(f"{mock_session.rest_url}/search/JobOrder")
+        route.side_effect = [
+            httpx.Response(401, text="Unauthorized"),
+            httpx.Response(200, json={"data": [sample_job]}),
+        ]
+
+        client = BullhornClient(mock_auth)
+        results = client.search("JobOrder", "isOpen:1")
+
+        # Should have refreshed session and retried
+        assert mock_auth._refresh_session.called
+        assert len(results) == 1
+
+
+class TestDefaultFields:
+    """Tests for default field constants."""
+
+    def test_job_order_defaults(self):
+        """Test JobOrder default fields."""
+        assert "id" in DEFAULT_FIELDS["JobOrder"]
+        assert "title" in DEFAULT_FIELDS["JobOrder"]
+        assert "status" in DEFAULT_FIELDS["JobOrder"]
+        assert "salary" in DEFAULT_FIELDS["JobOrder"]
+
+    def test_candidate_defaults(self):
+        """Test Candidate default fields."""
+        assert "id" in DEFAULT_FIELDS["Candidate"]
+        assert "firstName" in DEFAULT_FIELDS["Candidate"]
+        assert "lastName" in DEFAULT_FIELDS["Candidate"]
+        assert "email" in DEFAULT_FIELDS["Candidate"]
+
+    def test_placement_defaults(self):
+        """Test Placement default fields."""
+        assert "id" in DEFAULT_FIELDS["Placement"]
+        assert "candidate" in DEFAULT_FIELDS["Placement"]
+        assert "jobOrder" in DEFAULT_FIELDS["Placement"]
