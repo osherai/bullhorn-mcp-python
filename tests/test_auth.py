@@ -193,3 +193,245 @@ class TestBullhornAuth:
         assert auth_route.call_count == 1  # Still 1, no new auth
 
         assert session1.bh_rest_token == session2.bh_rest_token
+
+    @respx.mock
+    def test_regional_redirect_307(self, sample_config):
+        """Test handling of 307 redirect to regional Bullhorn server.
+
+        When Bullhorn redirects to a regional server (307), we follow it.
+        The regional URL is only captured when the redirect containing
+        the auth code is to a Bullhorn domain.
+        """
+        # First request gets 307 redirect to regional server
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            return_value=httpx.Response(
+                307,
+                headers={"location": "https://auth-apac.bullhornstaffing.com/oauth/authorize?client_id=test"},
+            )
+        )
+
+        # Regional server returns auth code in redirect to external callback
+        # (This is the typical OAuth flow - redirect to registered callback URL)
+        respx.get("https://auth-apac.bullhornstaffing.com/oauth/authorize").mock(
+            return_value=httpx.Response(
+                302,
+                headers={"location": "https://callback.example.com?code=regional_code_123"},
+            )
+        )
+
+        # Token exchange uses original auth URL (regional URL not captured
+        # because callback.example.com is not a Bullhorn domain)
+        respx.post(f"{sample_config.auth_url}/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "regional_access_token",
+                    "refresh_token": "regional_refresh_token",
+                    "expires_in": 600,
+                },
+            )
+        )
+
+        # REST login
+        respx.get(f"{sample_config.login_url}/rest-services/login").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "BhRestToken": "bh_token_regional",
+                    "restUrl": "https://rest-apac.bullhornstaffing.com/rest-services/abc/",
+                },
+            )
+        )
+
+        auth = BullhornAuth(sample_config)
+        session = auth.session
+
+        assert session.bh_rest_token == "bh_token_regional"
+        # Regional URL is not set when callback is to external domain
+        assert auth._regional_auth_url is None
+
+    @respx.mock
+    def test_regional_redirect_with_bullhorn_callback(self, sample_config):
+        """Test that regional URL is captured when redirect contains Bullhorn domain."""
+        # Redirect directly to regional Bullhorn domain with auth code
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            return_value=httpx.Response(
+                302,
+                headers={"location": "https://auth-apac.bullhornstaffing.com/callback?code=regional_code_123"},
+            )
+        )
+
+        # Token exchange uses regional URL
+        respx.post("https://auth-apac.bullhornstaffing.com/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "regional_access_token",
+                    "refresh_token": "regional_refresh_token",
+                    "expires_in": 600,
+                },
+            )
+        )
+
+        # REST login
+        respx.get(f"{sample_config.login_url}/rest-services/login").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "BhRestToken": "bh_token_regional",
+                    "restUrl": "https://rest-apac.bullhornstaffing.com/rest-services/abc/",
+                },
+            )
+        )
+
+        auth = BullhornAuth(sample_config)
+        session = auth.session
+
+        assert session.bh_rest_token == "bh_token_regional"
+        assert auth._regional_auth_url == "https://auth-apac.bullhornstaffing.com"
+
+    @respx.mock
+    def test_auth_code_in_redirect_without_regional_domain(self, sample_config):
+        """Test extracting auth code from non-Bullhorn callback URL."""
+        # Auth code returned in redirect to external callback URL
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            return_value=httpx.Response(
+                302,
+                headers={"location": "https://myapp.example.com/callback?code=external_code_456"},
+            )
+        )
+
+        # Token exchange (uses original auth URL since no regional redirect)
+        respx.post(f"{sample_config.auth_url}/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "access_token",
+                    "refresh_token": "refresh_token",
+                    "expires_in": 600,
+                },
+            )
+        )
+
+        # REST login
+        respx.get(f"{sample_config.login_url}/rest-services/login").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "BhRestToken": "bh_token",
+                    "restUrl": "https://rest.bullhornstaffing.com/rest-services/abc/",
+                },
+            )
+        )
+
+        auth = BullhornAuth(sample_config)
+        session = auth.session
+
+        assert session.bh_rest_token == "bh_token"
+        # Regional URL should not be set when callback is to external domain
+        assert auth._regional_auth_url is None
+
+    @respx.mock
+    def test_refresh_token_uses_regional_url(self, sample_config):
+        """Test that token refresh uses regional URL when set."""
+        # Initial auth with regional redirect
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            return_value=httpx.Response(
+                302,
+                headers={"location": "https://auth-emea.bullhornstaffing.com/callback?code=code123"},
+            )
+        )
+
+        # Token exchange at regional URL
+        respx.post("https://auth-emea.bullhornstaffing.com/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "initial_token",
+                    "refresh_token": "refresh_123",
+                    "expires_in": 600,
+                },
+            )
+        )
+
+        # REST login
+        respx.get(f"{sample_config.login_url}/rest-services/login").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "BhRestToken": "bh_token",
+                    "restUrl": "https://rest.example.com/",
+                },
+            )
+        )
+
+        auth = BullhornAuth(sample_config)
+        _ = auth.session  # Trigger initial auth
+
+        # Verify regional URL was captured
+        assert auth._regional_auth_url == "https://auth-emea.bullhornstaffing.com"
+
+        # Now test refresh - should use regional URL
+        refresh_route = respx.post("https://auth-emea.bullhornstaffing.com/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "refreshed_token",
+                    "refresh_token": "new_refresh",
+                    "expires_in": 600,
+                },
+            )
+        )
+
+        # Force a refresh
+        auth._refresh_access_token()
+
+        # Verify refresh was called at regional URL
+        assert refresh_route.called
+        assert auth._access_token == "refreshed_token"
+
+    @respx.mock
+    def test_no_auth_code_in_response(self, sample_config):
+        """Test error when no auth code is returned."""
+        # Response with no code parameter
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            return_value=httpx.Response(200, text="Login page HTML")
+        )
+
+        auth = BullhornAuth(sample_config)
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            _ = auth.session
+
+        assert "Failed to get auth code" in str(exc_info.value)
+
+    @respx.mock
+    def test_rest_login_missing_token(self, sample_config):
+        """Test error when REST login returns incomplete data."""
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            return_value=httpx.Response(
+                302,
+                headers={"location": "https://callback.example.com?code=code123"},
+            )
+        )
+        respx.post(f"{sample_config.auth_url}/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "token", "expires_in": 600},
+            )
+        )
+
+        # REST login returns incomplete data
+        respx.get(f"{sample_config.login_url}/rest-services/login").mock(
+            return_value=httpx.Response(
+                200,
+                json={"someOtherField": "value"},  # Missing BhRestToken and restUrl
+            )
+        )
+
+        auth = BullhornAuth(sample_config)
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            _ = auth.session
+
+        assert "Invalid login response" in str(exc_info.value)

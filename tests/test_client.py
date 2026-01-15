@@ -200,6 +200,48 @@ class TestBullhornClient:
         assert len(results) == 1
 
 
+class TestPagination:
+    """Tests for search and query pagination."""
+
+    @respx.mock
+    def test_search_with_start_offset(self, mock_auth, mock_session):
+        """Test search with start parameter for pagination."""
+        route = respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.search("JobOrder", "isOpen:1", start=50)
+
+        assert "start=50" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_query_with_start_offset(self, mock_auth, mock_session):
+        """Test query with start parameter for pagination."""
+        route = respx.get(f"{mock_session.rest_url}/query/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.query("JobOrder", "salary > 100000", start=100)
+
+        assert "start=100" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_search_pagination_combined(self, mock_auth, mock_session):
+        """Test search with both start and count for pagination."""
+        route = respx.get(f"{mock_session.rest_url}/search/Candidate").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.search("Candidate", "status:Active", count=25, start=75)
+
+        url = str(route.calls[0].request.url)
+        assert "start=75" in url
+        assert "count=25" in url
+
+
 class TestDefaultFields:
     """Tests for default field constants."""
 
@@ -222,3 +264,67 @@ class TestDefaultFields:
         assert "id" in DEFAULT_FIELDS["Placement"]
         assert "candidate" in DEFAULT_FIELDS["Placement"]
         assert "jobOrder" in DEFAULT_FIELDS["Placement"]
+
+    def test_client_corporation_defaults(self):
+        """Test ClientCorporation default fields."""
+        assert "id" in DEFAULT_FIELDS["ClientCorporation"]
+        assert "name" in DEFAULT_FIELDS["ClientCorporation"]
+        assert "status" in DEFAULT_FIELDS["ClientCorporation"]
+
+    def test_client_contact_defaults(self):
+        """Test ClientContact default fields."""
+        assert "id" in DEFAULT_FIELDS["ClientContact"]
+        assert "firstName" in DEFAULT_FIELDS["ClientContact"]
+        assert "clientCorporation" in DEFAULT_FIELDS["ClientContact"]
+
+
+class TestEdgeCases:
+    """Tests for edge cases and error scenarios."""
+
+    @respx.mock
+    def test_search_empty_results(self, mock_auth, mock_session):
+        """Test search returns empty list when no results."""
+        respx.get(f"{mock_session.rest_url}/search/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        results = client.search("JobOrder", "title:NonexistentJob12345")
+
+        assert results == []
+
+    @respx.mock
+    def test_get_entity_empty_data(self, mock_auth, mock_session):
+        """Test get returns empty dict when entity not found."""
+        respx.get(f"{mock_session.rest_url}/entity/JobOrder/99999").mock(
+            return_value=httpx.Response(200, json={"data": {}})
+        )
+
+        client = BullhornClient(mock_auth)
+        result = client.get("JobOrder", 99999)
+
+        assert result == {}
+
+    @respx.mock
+    def test_query_count_capped_at_500(self, mock_auth, mock_session):
+        """Test that query count is also capped at 500."""
+        route = respx.get(f"{mock_session.rest_url}/query/JobOrder").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.query("JobOrder", "isOpen=true", count=1000)
+
+        assert "count=500" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_search_unknown_entity_uses_id_field(self, mock_auth, mock_session):
+        """Test that unknown entity types default to 'id' field."""
+        route = respx.get(f"{mock_session.rest_url}/search/UnknownEntity").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+
+        client = BullhornClient(mock_auth)
+        client.search("UnknownEntity", "someField:value")
+
+        assert "fields=id" in str(route.calls[0].request.url)
