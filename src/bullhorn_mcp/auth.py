@@ -34,6 +34,7 @@ class BullhornAuth:
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._token_expires_at: float = 0
+        self._regional_auth_url: str | None = None  # Set if redirected to regional server
 
     @property
     def session(self) -> BullhornSession:
@@ -78,20 +79,40 @@ class BullhornAuth:
         url = f"{self.config.auth_url}/oauth/authorize?{urlencode(params)}"
 
         with httpx.Client(follow_redirects=False) as client:
-            response = client.get(url)
+            # May need to follow regional redirects (307 to auth-apac, auth-emea, etc.)
+            max_redirects = 5
+            for _ in range(max_redirects):
+                response = client.get(url)
 
-            # Bullhorn redirects with the auth code in the URL
-            if response.status_code in (301, 302, 303, 307, 308):
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+
                 location = response.headers.get("location", "")
+                if not location:
+                    break
+
                 parsed = urlparse(location)
                 query_params = parse_qs(parsed.query)
 
+                # Check if this redirect contains the auth code
                 if "code" in query_params:
+                    # Only update regional URL if redirected to a Bullhorn domain
+                    if parsed.netloc and "bullhornstaffing.com" in parsed.netloc:
+                        self._regional_auth_url = f"{parsed.scheme}://{parsed.netloc}"
                     return query_params["code"][0]
-                elif "error" in query_params:
+
+                # Check for OAuth errors
+                if "error" in query_params:
                     error = query_params.get("error", ["unknown"])[0]
                     error_desc = query_params.get("error_description", [""])[0]
                     raise AuthenticationError(f"OAuth error: {error} - {error_desc}")
+
+                # Only follow redirects to Bullhorn domains (regional servers)
+                if "bullhornstaffing.com" in parsed.netloc:
+                    url = location
+                else:
+                    # Non-Bullhorn redirect without code - something's wrong
+                    break
 
             raise AuthenticationError(
                 f"Failed to get auth code. Status: {response.status_code}"
@@ -99,7 +120,8 @@ class BullhornAuth:
 
     def _exchange_auth_code(self, auth_code: str) -> None:
         """Exchange authorization code for access token."""
-        url = f"{self.config.auth_url}/oauth/token"
+        auth_url = self._regional_auth_url or self.config.auth_url
+        url = f"{auth_url}/oauth/token"
         params = {
             "grant_type": "authorization_code",
             "code": auth_code,
@@ -128,7 +150,8 @@ class BullhornAuth:
         if not self._refresh_token:
             raise AuthenticationError("No refresh token available")
 
-        url = f"{self.config.auth_url}/oauth/token"
+        auth_url = self._regional_auth_url or self.config.auth_url
+        url = f"{auth_url}/oauth/token"
         params = {
             "grant_type": "refresh_token",
             "refresh_token": self._refresh_token,
