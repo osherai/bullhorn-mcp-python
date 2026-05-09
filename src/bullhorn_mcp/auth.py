@@ -3,7 +3,7 @@
 import time
 import httpx
 from dataclasses import dataclass
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import quote, urlencode, urlparse, parse_qs
 
 from .config import BullhornConfig
 
@@ -76,7 +76,8 @@ class BullhornAuth:
             "password": self.config.password,
         }
 
-        url = f"{self.config.auth_url}/oauth/authorize?{urlencode(params)}"
+        query = urlencode(params, quote_via=quote)
+        url = f"{self.config.auth_url}/oauth/authorize?{query}"
 
         with httpx.Client(follow_redirects=False) as client:
             # May need to follow regional redirects (307 to auth-apac, auth-emea, etc.)
