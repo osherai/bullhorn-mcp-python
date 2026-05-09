@@ -85,6 +85,47 @@ class TestBullhornAuth:
         assert session.expires_at > time.time()
 
     @respx.mock
+    def test_authorize_url_percent_encodes_special_password(self, sample_config):
+        """Test special password characters are encoded as URL percent escapes."""
+        sample_config.password = "p@ss*word?! plus+amp&eq=space value/slash"
+        captured_url = {}
+
+        def auth_response(request):
+            captured_url["url"] = str(request.url)
+            return httpx.Response(
+                302,
+                headers={"location": "https://callback.example.com?code=auth_code_123"},
+            )
+
+        respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
+            side_effect=auth_response
+        )
+        respx.post(f"{sample_config.auth_url}/oauth/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={"access_token": "access_token_123", "expires_in": 600},
+            )
+        )
+        respx.get(f"{sample_config.login_url}/rest-services/login").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "BhRestToken": "bh_rest_token_123",
+                    "restUrl": "https://rest99.bullhornstaffing.com/rest-services/abc/",
+                },
+            )
+        )
+
+        auth = BullhornAuth(sample_config)
+        _ = auth.session
+
+        assert (
+            "password=p%40ss%2Aword%3F%21%20plus%2Bamp%26eq%3Dspace%20value%2Fslash"
+            in captured_url["url"]
+        )
+        assert "space+value" not in captured_url["url"]
+
+    @respx.mock
     def test_auth_code_error(self, sample_config):
         """Test handling of OAuth error response."""
         respx.get(f"{sample_config.auth_url}/oauth/authorize").mock(
